@@ -2,3 +2,5 @@ torch
 transformers
 kss
 pandas
+scikit-learn
+tqdm
