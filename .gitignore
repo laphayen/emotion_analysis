@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+env/
+venv/
+.venv/
+pip-log.txt
+*.log
+*.sqlite3
+
+# VSCode 설정
+.vscode/
+
+# Jupyter Notebook 체크포인트
+.ipynb_checkpoints/
+
+# Mac OS
+.DS_Store
+
+# Hugging Face Transformers 캐시
+~/.cache/huggingface/
+.cache/
+*.safetensors
+
+# PyCharm
+.idea/
+
+# 모델/데이터 파일 (수동 업로드)
+*.pth
+*.pt
+*.bin
+*.ckpt
+*.onnx
+*.jsonl
+
+# 기타
+emotion_result.json
