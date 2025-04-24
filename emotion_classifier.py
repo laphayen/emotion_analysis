@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 # 감정 레이블 (클래스 수는 모델에 따라 다를 수 있음)
-LABELS = ['기쁨', '슬픔', '분노', '놀람', '불안', '평온']
+LABELS = ['기쁨', '당황', '분노', '불안', '상처', '슬픔']
 
 class EmotionClassifier:
     def __init__(self, model_name='klue/roberta-base'):
