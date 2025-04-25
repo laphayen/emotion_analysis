@@ -4,3 +4,4 @@ kss
 pandas
 scikit-learn
 tqdm
+matplotlib
