@@ -12,7 +12,7 @@ from torch import nn
 from torch.optim import AdamW
 from tqdm import tqdm
 
-# 1. Load and preprocess data
+# Load and preprocess data
 df = pd.read_csv("emotion_dataset1.csv", encoding='cp949', sep="\t")
 le = LabelEncoder()
 df['label'] = le.fit_transform(df['emotion'])
@@ -42,6 +42,9 @@ class EmotionDataset(Dataset):
         token_ids = [self.vocab['[CLS]']] + [self.vocab[token] for token in tokens] + [self.vocab['[SEP]']]
 
         # 패딩
+        tokens = self.tokenizer(text)
+        token_ids = [self.vocab['[CLS]']] + [self.vocab[token] for token in tokens] + [self.vocab['[SEP]']]
+        
         token_ids = token_ids[:self.max_len]
         attention_mask = [1] * len(token_ids)
         pad_len = self.max_len - len(token_ids)
@@ -72,17 +75,23 @@ val_loader = DataLoader(val_dataset, batch_size=16)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
-# classifier head 추가
-model.classifier = nn.Linear(model.config.hidden_size, len(le.classes_)).to(device)
+# Dropout 추가 및 classifier 설정 변경
+model.classifier = nn.Sequential(
+    nn.Dropout(0.3),
+    nn.Linear(model.config.hidden_size, len(le.classes_))
+).to(device)
 
 checkpoint_path = "./kobert_emotion_model"
 model_ckpt = os.path.join(checkpoint_path, "pytorch_model.bin")
 optimizer_ckpt = os.path.join(checkpoint_path, "optimizer.pt")
 metadata_file = os.path.join(checkpoint_path, "metadata.json")
 
-optimizer = AdamW(model.parameters(), lr=2e-5)
+# 학습률 조정
+optimizer = AdamW(model.parameters(), lr=1e-5)
 
 start_epoch = 0
+best_val_loss = float('inf')
+
 if os.path.exists(metadata_file):
     print("🔁 기존 모델 + 옵티마이저 상태 복구하여 이어서 학습합니다.")
     if os.path.exists(model_ckpt):
@@ -92,13 +101,13 @@ if os.path.exists(metadata_file):
     with open(metadata_file, "r", encoding="utf-8") as f:
         metadata = json.load(f)
     start_epoch = metadata.get("last_epoch", 0) + 1
+    best_val_loss = metadata.get("best_val_loss", float('inf'))
 else:
     print("🆕 새로운 모델로 학습을 시작합니다.")
     os.makedirs(checkpoint_path, exist_ok=True)
 
 loss_fn = nn.CrossEntropyLoss()
 
-# 3. Training loop
 train_losses = []
 val_losses = []
 epochs_to_run = 5
@@ -113,7 +122,7 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
         labels = batch['labels'].to(device)
 
         outputs = model(input_ids, token_type_ids=None, attention_mask=attention_mask)
-        logits = model.classifier(outputs[1])  # pooled_output
+        logits = model.classifier(outputs[1])
         loss = loss_fn(logits, labels)
         total_train_loss += loss.item()
 
@@ -135,7 +144,7 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
             labels = batch['labels'].to(device)
 
             outputs = model(input_ids, token_type_ids=None, attention_mask=attention_mask)
-            logits = model.classifier(outputs[1])  # pooled_output
+            logits = model.classifier(outputs[1])
             loss = loss_fn(logits, labels)
             total_val_loss += loss.item()
 
@@ -143,14 +152,17 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
     val_losses.append(avg_val_loss)
     print(f"🧪 Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
 
-    # Save model + optimizer + metadata
-    torch.save(model.state_dict(), model_ckpt)
-    torch.save(optimizer.state_dict(), optimizer_ckpt)
-    pd.DataFrame(list(le.classes_)).to_csv(os.path.join(checkpoint_path, "labels.csv"), index=False, header=False)
-    with open(metadata_file, "w", encoding="utf-8") as f:
-        json.dump({"last_epoch": epoch}, f)
+    # Validation Loss가 최소일 때만 저장
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        torch.save(model.state_dict(), model_ckpt)
+        torch.save(optimizer.state_dict(), optimizer_ckpt)
+        pd.DataFrame(list(le.classes_)).to_csv(os.path.join(checkpoint_path, "labels.csv"), index=False, header=False)
+        with open(metadata_file, "w", encoding="utf-8") as f:
+            json.dump({"last_epoch": epoch, "best_val_loss": best_val_loss}, f)
+        print(f"🎉 모델 저장 완료 (Epoch: {epoch}, Val Loss: {best_val_loss:.4f})")
 
-# 4. Plot loss curves
+# Plotting loss curves
 plt.figure(figsize=(10, 6))
 plt.plot(range(start_epoch, start_epoch + epochs_to_run), train_losses, label='Train Loss', marker='o')
 plt.plot(range(start_epoch, start_epoch + epochs_to_run), val_losses, label='Validation Loss', marker='o')
