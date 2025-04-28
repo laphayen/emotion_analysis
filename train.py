@@ -13,7 +13,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 # 1. Load and preprocess data
-df = pd.read_csv("emotion_dataset.csv")
+df = pd.read_csv("emotion_dataset1.csv", encoding='cp949', sep="\t")
 le = LabelEncoder()
 df['label'] = le.fit_transform(df['emotion'])
 
@@ -146,6 +146,7 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
     # Save model + optimizer + metadata
     torch.save(model.state_dict(), model_ckpt)
     torch.save(optimizer.state_dict(), optimizer_ckpt)
+    pd.DataFrame(list(le.classes_)).to_csv(os.path.join(checkpoint_path, "labels.csv"), index=False, header=False)
     with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump({"last_epoch": epoch}, f)
 
