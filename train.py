@@ -10,20 +10,21 @@ from kobert import get_pytorch_kobert_model, get_tokenizer
 from gluonnlp.data import SentencepieceTokenizer
 from torch import nn
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
-# Load and preprocess data
+# 데이터 로드 및 전처리
 df = pd.read_csv("emotion_dataset1.csv", encoding='cp949', sep="\t")
 le = LabelEncoder()
 df['label'] = le.fit_transform(df['emotion'])
 
-# KoBERT tokenizer
+# Tokenizer 준비
 tokenizer_path = get_tokenizer()
 sp_tokenizer = SentencepieceTokenizer(tokenizer_path)
 
-# Custom Dataset
+# Dataset 클래스
 class EmotionDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, vocab, max_len=64):
+    def __init__(self, texts, labels, tokenizer, vocab, max_len=128):
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer
@@ -57,7 +58,7 @@ class EmotionDataset(Dataset):
             'labels': torch.tensor(label, dtype=torch.long)
         }
 
-# 모델과 vocab 불러오기
+# KoBERT 모델 로딩
 model, vocab = get_pytorch_kobert_model()
 print("✅ KoBERT 모델 로드 성공!")
 
@@ -71,25 +72,23 @@ val_dataset = EmotionDataset(val_texts.tolist(), val_labels.tolist(), sp_tokeniz
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=16)
 
-# 2. Load model and optimizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
+model.to(device)
 
-# Dropout 추가 및 classifier 설정 변경
+# 모델 classifier 설정
 model.classifier = nn.Sequential(
-    nn.Dropout(0.3),
+    nn.Dropout(0.6),
     nn.Linear(model.config.hidden_size, len(le.classes_))
 ).to(device)
 
+# Optimizer 및 Scheduler 설정
+optimizer = AdamW(model.parameters(), lr=5e-6, weight_decay=0.01)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+
 checkpoint_path = "./kobert_emotion_model"
-model_ckpt = os.path.join(checkpoint_path, "pytorch_model.bin")
-optimizer_ckpt = os.path.join(checkpoint_path, "optimizer.pt")
+os.makedirs(checkpoint_path, exist_ok=True)
+model_ckpt = os.path.join(checkpoint_path, "best_model.bin")
 metadata_file = os.path.join(checkpoint_path, "metadata.json")
-
-# 학습률 조정
-optimizer = AdamW(model.parameters(), lr=1e-5)
-
-start_epoch = 0
 best_val_loss = float('inf')
 
 if os.path.exists(metadata_file):
@@ -109,10 +108,13 @@ else:
 loss_fn = nn.CrossEntropyLoss()
 
 train_losses = []
-val_losses = []
-epochs_to_run = 5
+epochs = 20
+patience = 4
+early_stop_counter = 0
 
-for epoch in range(start_epoch, start_epoch + epochs_to_run):
+train_losses, val_losses = [], []
+
+for epoch in range(epochs):
     model.train()
     total_train_loss = 0
 
@@ -124,11 +126,13 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
         outputs = model(input_ids, token_type_ids=None, attention_mask=attention_mask)
         logits = model.classifier(outputs[1])
         loss = loss_fn(logits, labels)
-        total_train_loss += loss.item()
 
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+
+        total_train_loss += loss.item()
 
     avg_train_loss = total_train_loss / len(train_loader)
     train_losses.append(avg_train_loss)
@@ -151,6 +155,7 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
     avg_val_loss = total_val_loss / len(val_loader)
     val_losses.append(avg_val_loss)
     print(f"🧪 Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
+    scheduler.step(avg_val_loss)
 
     # Validation Loss가 최소일 때만 저장
     if avg_val_loss < best_val_loss:
@@ -163,9 +168,10 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
         print(f"🎉 모델 저장 완료 (Epoch: {epoch}, Val Loss: {best_val_loss:.4f})")
 
 # Plotting loss curves
+# Loss 시각화
 plt.figure(figsize=(10, 6))
-plt.plot(range(start_epoch, start_epoch + epochs_to_run), train_losses, label='Train Loss', marker='o')
-plt.plot(range(start_epoch, start_epoch + epochs_to_run), val_losses, label='Validation Loss', marker='o')
+plt.plot(train_losses, label='Train Loss', marker='o')
+plt.plot(val_losses, label='Validation Loss', marker='o')
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.title("Training vs Validation Loss")
