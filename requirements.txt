@@ -1,7 +1,26 @@
-torch
-transformers
-kss
-pandas
-scikit-learn
-tqdm
-matplotlib
+# Core
+torch==1.10.1+cu111
+torchvision==0.10.1+cu111
+torchaudio==0.10.1
+
+# KoBERT dependencies
+gluonnlp==0.10.0
+mxnet==1.7.0.post2
+sentencepiece==0.1.96
+transformers==4.8.1
+boto3==1.15.18
+
+# Data & Preprocessing
+pandas==1.5.3
+scikit-learn==1.2.2
+
+# Utilities
+matplotlib==3.5.3
+tqdm==4.67.1
+
+# Essential for Transformers
+huggingface-hub==0.0.12
+filelock>=3.0.0
+regex!=2019.12.17
+sacremoses==0.0.53
+requests==2.18.4
