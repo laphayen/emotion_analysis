@@ -3,12 +3,13 @@ import json
 import pandas as pd
 import torch
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from transformers import BertTokenizer, BertForSequenceClassification
+from kobert import get_pytorch_kobert_model, get_tokenizer 
+from gluonnlp.data import SentencepieceTokenizer
+from torch import nn
 from torch.optim import AdamW
-from dataset import EmotionDataset
 from tqdm import tqdm
 
 # 1. Load and preprocess data
@@ -16,45 +17,91 @@ df = pd.read_csv("emotion_dataset.csv")
 le = LabelEncoder()
 df['label'] = le.fit_transform(df['emotion'])
 
-tokenizer = BertTokenizer.from_pretrained("monologg/kobert")
+# KoBERT tokenizer
+tokenizer_path = get_tokenizer()
+sp_tokenizer = SentencepieceTokenizer(tokenizer_path)
+
+# Custom Dataset
+class EmotionDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, vocab, max_len=64):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.vocab = vocab
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        # 토크나이징
+        tokens = self.tokenizer(text)
+        token_ids = [self.vocab['[CLS]']] + [self.vocab[token] for token in tokens] + [self.vocab['[SEP]']]
+
+        # 패딩
+        token_ids = token_ids[:self.max_len]
+        attention_mask = [1] * len(token_ids)
+        pad_len = self.max_len - len(token_ids)
+        token_ids += [self.vocab['[PAD]']] * pad_len
+        attention_mask += [0] * pad_len
+
+        return {
+            'input_ids': torch.tensor(token_ids, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
+            'labels': torch.tensor(label, dtype=torch.long)
+        }
+
+# 모델과 vocab 불러오기
+model, vocab = get_pytorch_kobert_model()
+print("✅ KoBERT 모델 로드 성공!")
 
 train_texts, val_texts, train_labels, val_labels = train_test_split(
     df['sentence'], df['label'], test_size=0.2, random_state=42
 )
 
-train_dataset = EmotionDataset(train_texts.tolist(), train_labels.tolist(), tokenizer, max_len=64)
-val_dataset = EmotionDataset(val_texts.tolist(), val_labels.tolist(), tokenizer, max_len=64)
+train_dataset = EmotionDataset(train_texts.tolist(), train_labels.tolist(), sp_tokenizer, vocab)
+val_dataset = EmotionDataset(val_texts.tolist(), val_labels.tolist(), sp_tokenizer, vocab)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=16)
 
 # 2. Load model and optimizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+
+# classifier head 추가
+model.classifier = nn.Linear(model.config.hidden_size, len(le.classes_)).to(device)
+
 checkpoint_path = "./kobert_emotion_model"
 model_ckpt = os.path.join(checkpoint_path, "pytorch_model.bin")
-optimizer_ckpt = os.path.join(checkpoint_path, "optimizer.pt") 
+optimizer_ckpt = os.path.join(checkpoint_path, "optimizer.pt")
 metadata_file = os.path.join(checkpoint_path, "metadata.json")
 
-if os.path.exists(checkpoint_path) and os.path.exists(metadata_file):
-    print("🔁 기존 모델에서 이어서 학습합니다.")
-    model = BertForSequenceClassification.from_pretrained(checkpoint_path).to(device)
-    tokenizer = BertTokenizer.from_pretrained(checkpoint_path)
+optimizer = AdamW(model.parameters(), lr=2e-5)
+
+start_epoch = 0
+if os.path.exists(metadata_file):
+    print("🔁 기존 모델 + 옵티마이저 상태 복구하여 이어서 학습합니다.")
+    if os.path.exists(model_ckpt):
+        model.load_state_dict(torch.load(model_ckpt))
+    if os.path.exists(optimizer_ckpt):
+        optimizer.load_state_dict(torch.load(optimizer_ckpt))
     with open(metadata_file, "r", encoding="utf-8") as f:
         metadata = json.load(f)
     start_epoch = metadata.get("last_epoch", 0) + 1
 else:
     print("🆕 새로운 모델로 학습을 시작합니다.")
-    model = BertForSequenceClassification.from_pretrained("monologg/kobert", num_labels=len(le.classes_)).to(device)
-    start_epoch = 0
     os.makedirs(checkpoint_path, exist_ok=True)
 
-optimizer = AdamW(model.parameters(), lr=2e-5)
-loss_fn = torch.nn.CrossEntropyLoss()
+loss_fn = nn.CrossEntropyLoss()
 
 # 3. Training loop
 train_losses = []
 val_losses = []
-epochs_to_run = 5  # 추가로 학습할 epoch 수
+epochs_to_run = 5
 
 for epoch in range(start_epoch, start_epoch + epochs_to_run):
     model.train()
@@ -65,8 +112,9 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
 
-        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
+        outputs = model(input_ids, token_type_ids=None, attention_mask=attention_mask)
+        logits = model.classifier(outputs[1])  # pooled_output
+        loss = loss_fn(logits, labels)
         total_train_loss += loss.item()
 
         optimizer.zero_grad()
@@ -86,8 +134,10 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
 
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-            total_val_loss += outputs.loss.item()
+            outputs = model(input_ids, token_type_ids=None, attention_mask=attention_mask)
+            logits = model.classifier(outputs[1])  # pooled_output
+            loss = loss_fn(logits, labels)
+            total_val_loss += loss.item()
 
     avg_val_loss = total_val_loss / len(val_loader)
     val_losses.append(avg_val_loss)
@@ -96,8 +146,6 @@ for epoch in range(start_epoch, start_epoch + epochs_to_run):
     # Save model + optimizer + metadata
     torch.save(model.state_dict(), model_ckpt)
     torch.save(optimizer.state_dict(), optimizer_ckpt)
-    tokenizer.save_pretrained(checkpoint_path)
-    pd.DataFrame(list(le.classes_)).to_csv(os.path.join(checkpoint_path, "labels.csv"), index=False, header=False)
     with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump({"last_epoch": epoch}, f)
 
