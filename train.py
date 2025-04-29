@@ -10,7 +10,7 @@ from kobert import get_pytorch_kobert_model, get_tokenizer
 from gluonnlp.data import SentencepieceTokenizer
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from tqdm import tqdm
 
 # 데이터 로드 및 전처리
@@ -38,14 +38,9 @@ class EmotionDataset(Dataset):
         text = self.texts[idx]
         label = self.labels[idx]
 
-        # 토크나이징
         tokens = self.tokenizer(text)
-        token_ids = [self.vocab['[CLS]']] + [self.vocab[token] for token in tokens] + [self.vocab['[SEP]']]
+        token_ids = [self.vocab['[CLS]']] + [self.vocab[token] if token in self.vocab.token_to_idx else self.vocab['[UNK]'] for token in tokens] + [self.vocab['[SEP]']]
 
-        # 패딩
-        tokens = self.tokenizer(text)
-        token_ids = [self.vocab['[CLS]']] + [self.vocab[token] for token in tokens] + [self.vocab['[SEP]']]
-        
         token_ids = token_ids[:self.max_len]
         attention_mask = [1] * len(token_ids)
         pad_len = self.max_len - len(token_ids)
@@ -77,17 +72,18 @@ model.to(device)
 
 # 모델 classifier 설정
 model.classifier = nn.Sequential(
-    nn.Dropout(0.6),
+    nn.Dropout(0.3),
     nn.Linear(model.config.hidden_size, len(le.classes_))
 ).to(device)
 
 # Optimizer 및 Scheduler 설정
-optimizer = AdamW(model.parameters(), lr=5e-6, weight_decay=0.01)
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+optimizer = AdamW(model.parameters(), lr=1e-6, weight_decay=0.01)
+scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=1)
 
 checkpoint_path = "./kobert_emotion_model"
 os.makedirs(checkpoint_path, exist_ok=True)
 model_ckpt = os.path.join(checkpoint_path, "best_model.bin")
+optimizer_ckpt = os.path.join(checkpoint_path, "optimizer.pt")
 metadata_file = os.path.join(checkpoint_path, "metadata.json")
 best_val_loss = float('inf')
 
@@ -99,26 +95,24 @@ if os.path.exists(metadata_file):
         optimizer.load_state_dict(torch.load(optimizer_ckpt))
     with open(metadata_file, "r", encoding="utf-8") as f:
         metadata = json.load(f)
-    start_epoch = metadata.get("last_epoch", 0) + 1
-    best_val_loss = metadata.get("best_val_loss", float('inf'))
+    start_epoch = metadata.get("last_epoch", 0)
 else:
     print("🆕 새로운 모델로 학습을 시작합니다.")
-    os.makedirs(checkpoint_path, exist_ok=True)
+    start_epoch = 0
 
 loss_fn = nn.CrossEntropyLoss()
 
 train_losses = []
-epochs = 20
+val_losses = []
+epochs = 1
 patience = 4
 early_stop_counter = 0
 
-train_losses, val_losses = [], []
-
-for epoch in range(epochs):
+for epoch in range(start_epoch, start_epoch + epochs):
     model.train()
     total_train_loss = 0
 
-    for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
@@ -129,8 +123,9 @@ for epoch in range(epochs):
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
+        scheduler.step(epoch + batch_idx / len(train_loader))
 
         total_train_loss += loss.item()
 
@@ -155,9 +150,7 @@ for epoch in range(epochs):
     avg_val_loss = total_val_loss / len(val_loader)
     val_losses.append(avg_val_loss)
     print(f"🧪 Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
-    scheduler.step(avg_val_loss)
 
-    # Validation Loss가 최소일 때만 저장
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
         torch.save(model.state_dict(), model_ckpt)
@@ -167,7 +160,6 @@ for epoch in range(epochs):
             json.dump({"last_epoch": epoch, "best_val_loss": best_val_loss}, f)
         print(f"🎉 모델 저장 완료 (Epoch: {epoch}, Val Loss: {best_val_loss:.4f})")
 
-# Plotting loss curves
 # Loss 시각화
 plt.figure(figsize=(10, 6))
 plt.plot(train_losses, label='Train Loss', marker='o')
@@ -180,3 +172,30 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig("loss_plot.png")
 plt.show()
+
+
+"""
+epochs 0~7까지
+optimizer =>  lr=1e-6, weight_decay=0.02
+factor=0.5, patience=2
+Dropout(0.6)
+patience = 4
+
+----- 
+
+epochs 8~13까지
+optimizer =>  lr=1e-6, weight_decay=0.03
+factor=0.7, patience=3
+Dropout(0.7)
+patience = 4
+
+------
+
+epochs 14~19까지
+optimizer =>  lr=1e-6, weight_decay=0.04
+factor=0.5, patience=3
+Dropout(0.7)
+patience = 4
+
+
+"""
